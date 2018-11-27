@@ -34,6 +34,7 @@
 #include <QSettings>
 #include <QDirIterator>
 #include <sstream>
+#include "excludelist.h"
 
 int main(int argc, char **argv)
 {
@@ -60,6 +61,10 @@ int main(int argc, char **argv)
             // can just exit normally, version has been printed above
             return 0;
         }
+        if (argument == QByteArray("-show-exclude-libs")) {
+            qInfo() << generatedExcludelist;
+            return 0;
+        }
     }
 
     if (argc < 2 || (firstArgument.startsWith("-"))) {
@@ -67,23 +72,27 @@ int main(int argc, char **argv)
         qInfo() << "Usage: linuxdeployqt <app-binary|desktop file> [options]";
         qInfo() << "";
         qInfo() << "Options:";
-        qInfo() << "   -verbose=<0-3>           : 0 = no output, 1 = error/warning (default),";
-        qInfo() << "                              2 = normal, 3 = debug";
-        qInfo() << "   -no-plugins              : Skip plugin deployment";
-        qInfo() << "   -appimage                : Create an AppImage (implies -bundle-non-qt-libs)";
-        qInfo() << "   -no-strip                : Don't run 'strip' on the binaries";
-        qInfo() << "   -bundle-non-qt-libs      : Also bundle non-core, non-Qt libraries";
-        qInfo() << "   -executable=<path>       : Let the given executable use the deployed libraries";
-        qInfo() << "                              too";
-        qInfo() << "   -qmldir=<path>           : Scan for QML imports in the given path";
-        qInfo() << "   -always-overwrite        : Copy files even if the target file exists";
-        qInfo() << "   -qmake=<path>            : The qmake executable to use";
-        qInfo() << "   -no-translations         : Skip deployment of translations.";
-        qInfo() << "   -no-copy-copyright-files : Skip deployment of copyright files.";
-        qInfo() << "   -extra-plugins=<list>    : List of extra plugins which should be deployed,";
-        qInfo() << "                              separated by comma.";
+        qInfo() << "   -always-overwrite        : Copy files even if the target file exists.";
+        qInfo() << "   -appimage                : Create an AppImage (implies -bundle-non-qt-libs).";
+        qInfo() << "   -bundle-non-qt-libs      : Also bundle non-core, non-Qt libraries.";
         qInfo() << "   -exclude-libs=<list>     : List of libraries which should be excluded,";
         qInfo() << "                              separated by comma.";
+        qInfo() << "   -ignore-glob=<glob>      : Glob pattern relative to appdir to ignore when";
+        qInfo() << "                              searching for libraries.";
+        qInfo() << "   -executable=<path>       : Let the given executable use the deployed libraries";
+        qInfo() << "                              too";
+        qInfo() << "   -extra-plugins=<list>    : List of extra plugins which should be deployed,";
+        qInfo() << "                              separated by comma.";
+        qInfo() << "   -no-copy-copyright-files : Skip deployment of copyright files.";
+        qInfo() << "   -no-plugins              : Skip plugin deployment.";
+        qInfo() << "   -no-strip                : Don't run 'strip' on the binaries.";
+        qInfo() << "   -no-translations         : Skip deployment of translations.";
+        qInfo() << "   -qmake=<path>            : The qmake executable to use.";
+        qInfo() << "   -qmldir=<path>           : Scan for QML imports in the given path.";
+        qInfo() << "   -qmlimport=<path>        : Add the given path to QML module search locations.";
+        qInfo() << "   -show-exclude-libs       : Print exclude libraries list.";
+        qInfo() << "   -verbose=<0-3>           : 0 = no output, 1 = error/warning (default),";
+        qInfo() << "                              2 = normal, 3 = debug.";
         qInfo() << "   -version                 : Print version statement and exit.";
         qInfo() << "";
         qInfo() << "linuxdeployqt takes an application as input and makes it";
@@ -187,7 +196,7 @@ int main(int argc, char **argv)
     LogDebug() << newPath;
     setenv("PATH",newPath.toUtf8().constData(),1);
 
-    QString appName = QDir::cleanPath(QFileInfo(appBinaryPath).completeBaseName());
+    QString appName = QDir::cleanPath(QFileInfo(appBinaryPath).fileName());
 
     QString appDir = QDir::cleanPath(appBinaryPath + "/../");
     if (QDir().exists(appDir) == false) {
@@ -207,9 +216,11 @@ int main(int argc, char **argv)
     bool qmldirArgumentUsed = false;
     bool skipTranslations = false;
     QStringList qmlDirs;
+    QStringList qmlImportPaths;
     QString qmakeExecutable;
     extern QStringList extraQtPlugins;
     extern QStringList excludeLibs;
+    extern QStringList ignoreGlob;
     extern bool copyCopyrightFiles;
 
     /* FHS-like mode is for an application that has been installed to a $PREFIX which is otherwise empty, e.g., /path/to/usr.
@@ -363,8 +374,10 @@ int main(int argc, char **argv)
         }
     }
 
+    // Check arguments
     for (int i = 2; i < argc; ++i) {
         QByteArray argument = QByteArray(argv[i]);
+
         if (argument == QByteArray("-no-plugins")) {
             LogDebug() << "Argument found:" << argument;
             plugins = false;
@@ -402,6 +415,13 @@ int main(int argc, char **argv)
                 LogError() << "Missing qml directory path";
             else
                 qmlDirs << argument.mid(index+1);
+        } else if (argument.startsWith(QByteArray("-qmlimport"))) {
+            LogDebug() << "Argument found:" << argument;
+            int index = argument.indexOf('=');
+            if (index == -1)
+                LogError() << "Missing qml import path";
+            else
+                qmlImportPaths << argument.mid(index+1);
         } else if (argument.startsWith("-no-copy-copyright-files")) {
             LogDebug() << "Argument found:" << argument;
             copyCopyrightFiles = false;
@@ -423,6 +443,10 @@ int main(int argc, char **argv)
             LogDebug() << "Argument found:" << argument;
             int index = argument.indexOf("=");
             excludeLibs = QString(argument.mid(index + 1)).split(",");
+        } else if (argument.startsWith("-ignore-glob=")) {
+            LogDebug() << "Argument found:" << argument;
+            int index = argument.indexOf("=");
+            ignoreGlob += argument.mid(index + 1);
         } else if (argument.startsWith("--")) {
             LogError() << "Error: arguments must not start with --, only -:" << argument << "\n";
             return 1;
@@ -430,7 +454,7 @@ int main(int argc, char **argv)
             LogError() << "Unknown argument:" << argument << "\n";
             return 1;
         }
-     }
+    }
 
     if (appimage) {
         if(checkAppImagePrerequisites(appDirPath) == false){
@@ -456,7 +480,7 @@ int main(int argc, char **argv)
     }
 
     if (!qmlDirs.isEmpty()) {
-        bool ok = deployQmlImports(appDirPath, deploymentInfo, qmlDirs);
+        bool ok = deployQmlImports(appDirPath, deploymentInfo, qmlDirs, qmlImportPaths);
         if (!ok && qmldirArgumentUsed)
             return 1; // exit if the user explicitly asked for qml import deployment
         // Update deploymentInfo.deployedLibraries - the QML imports
